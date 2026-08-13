@@ -1,0 +1,15 @@
+# core
+numpy>=1.24
+moderngl>=5.8
+glfw>=2.6
+Pillow>=10.0
+
+# arbitrary precision for the reference orbit.
+# gmpy2 is GMP/MPFR-backed and roughly 20x faster than the pure-Python
+# fallback; if the wheel will not install, mpmath is used automatically.
+gmpy2>=2.1
+mpmath>=1.3
+
+# multicore CPU kernel (prange + AVX). Optional: without it the CPU paths
+# still run, just single-threaded and much slower.
+numba>=0.59

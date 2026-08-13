@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fraktalz — a benchmark that makes your silicon confess</title>
+<style>
+  :root { --bg:#0b0e14; --fg:#d8dee9; --dim:#7a8494; --acc:#e8a33d; --card:#121722; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.55 ui-monospace,'Cascadia Code',Consolas,monospace; }
+  main { max-width:880px; margin:0 auto; padding:2rem 1rem 4rem; }
+  h1 { font-size:1.6rem; color:var(--acc); margin:0 0 .2rem; }
+  .sub { color:var(--dim); margin-bottom:1.5rem; }
+  canvas#hero { width:100%; border-radius:8px; display:block; margin-bottom:1.5rem; }
+  button { background:var(--acc); color:#111; border:0; padding:.7rem 1.4rem;
+           font:inherit; font-weight:700; border-radius:6px; cursor:pointer; }
+  button:disabled { opacity:.4; cursor:wait; }
+  table { border-collapse:collapse; width:100%; margin:1.2rem 0; }
+  th,td { border:1px solid #263042; padding:.45rem .7rem; text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--acc); }
+  .big { color:var(--acc); font-weight:700; }
+  .note { color:var(--dim); font-size:.85rem; }
+  #log { color:var(--dim); white-space:pre-wrap; min-height:1.5em; }
+  .card { background:var(--card); border-radius:8px; padding:1rem 1.2rem; margin:1rem 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Fraktalz</h1>
+  <div class="sub">the same z&sup2;+c workload on every backend your browser has —
+  measured iterations, cross-checked, no estimates.</div>
+
+  <canvas id="hero" width="1024" height="360"></canvas>
+
+  <div class="card">
+    Workload: 1024&times;1024 tile, Seahorse Valley boundary, maxiter 5000.<br>
+    Backends: JS fp64 (1 thread) &middot; Web Workers fp64 (all cores) &middot;
+    WebGL2 fp32 &middot; WebGL2 <em>emulated</em> fp64 (Dekker double-float —
+    WebGL has no real doubles, so we build them from pairs of floats and
+    measure what that costs).
+    <p><button id="go">Run the benchmark</button></p>
+    <div id="log"></div>
+  </div>
+
+  <div id="results"></div>
+  <p class="note">Iteration totals are read back from each backend and compared:
+  JS is natively fp64, so it is the ground truth the emulated-double shader must
+  match. Desktop version with native fp64 + AVX:
+  <a href="https://github.com/ash23x/fraktalz" style="color:var(--acc)">github.com/ash23x/fraktalz</a></p>
+</main>
+<script>
+const W=1024, H=1024, CX=-0.743643887037151, CY=0.131825904205330,
+      STEP=2.0e-4/W, MAXITER=5000, FRAMES=8;
+
+// ---------------- hero render (pretty fp32 pass, just for the eyes)
+(function hero(){
+  const cv=document.getElementById('hero'), gl=cv.getContext('webgl2');
+  if(!gl) return;
+  const vs=`#version 300 es
+    void main(){vec2 v=vec2((gl_VertexID<<1)&2,gl_VertexID&2);
+    gl_Position=vec4(v*2.-1.,0.,1.);}`;
+  const fs=`#version 300 es
+    precision highp float; out vec4 o; uniform vec2 uRes;
+    void main(){
+      vec2 uv=(gl_FragCoord.xy-uRes*.5)/uRes.y;
+      vec2 c=vec2(-0.7436439,0.1318259)+uv*3.5e-4;
+      vec2 z=vec2(0.); float n=0.;
+      for(int i=0;i<900;i++){
+        float x2=z.x*z.x,y2=z.y*z.y;
+        if(x2+y2>1e6){break;}
+        z=vec2(x2-y2+c.x,2.*z.x*z.y+c.y); n+=1.;
+      }
+      float t=n>=900.?0.:n-log2(log2(dot(z,z)))+4.;
+      vec3 col=n>=900.?vec3(0.):0.5+0.5*cos(0.11*t+vec3(0.0,0.6,1.0));
+      o=vec4(pow(col,vec3(0.9)),1.);
+    }`;
+  function sh(t,s){const h=gl.createShader(t);gl.shaderSource(h,s);gl.compileShader(h);return h;}
+  const p=gl.createProgram();
+  gl.attachShader(p,sh(gl.VERTEX_SHADER,vs));
+  gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs));
+  gl.linkProgram(p); gl.useProgram(p);
+  gl.uniform2f(gl.getUniformLocation(p,'uRes'),cv.width,cv.height);
+  gl.viewport(0,0,cv.width,cv.height);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+})();
+
+// ---------------- CPU kernel (runs in main thread and in workers)
+const KERNEL = `function mandelRows(y0,y1,W,H,CX,CY,STEP,MAXITER){
+  const iters=new Int32Array((y1-y0)*W);
+  for(let j=y0;j<y1;j++){
+    const cy=CY+(j-H*0.5)*STEP;
+    for(let i=0;i<W;i++){
+      const cx=CX+(i-W*0.5)*STEP;
+      let zx=0,zy=0,n=0;
+      while(n<MAXITER){
+        const x2=zx*zx,y2=zy*zy;
+        if(x2+y2>4) break;
+        zy=2*zx*zy+cy; zx=x2-y2+cx; n++;
+      }
+      iters[(j-y0)*W+i]=n;
+    }
+  }
+  return iters;
+}`;
+eval(KERNEL);
+
+function benchJS1(){
+  const t0=performance.now();
+  const iters=mandelRows(0,H,W,H,CX,CY,STEP,MAXITER);
+  const dt=(performance.now()-t0)/1e3;
+  let total=0; for(let k=0;k<iters.length;k++) total+=iters[k];
+  return {total,dt,iters};
+}
+
+function benchWorkers(){
+  const N=Math.max(2,navigator.hardwareConcurrency||4);
+  const src=`${KERNEL}
+    onmessage=e=>{const a=e.data;
+      const r=mandelRows(a.y0,a.y1,a.W,a.H,a.CX,a.CY,a.STEP,a.MAXITER);
+      postMessage(r,[r.buffer]);};`;
+  const url=URL.createObjectURL(new Blob([src],{type:'text/javascript'}));
+  const ws=Array.from({length:N},()=>new Worker(url));
+  return new Promise(res=>{
+    const slab=Math.ceil(H/N); let done=0,total=0;
+    const t0=performance.now();
+    ws.forEach((w,k)=>{
+      w.onmessage=e=>{
+        const a=e.data; for(let i=0;i<a.length;i++) total+=a[i];
+        if(++done===N){
+          const dt=(performance.now()-t0)/1e3;
+          ws.forEach(w=>w.terminate()); URL.revokeObjectURL(url);
+          res({total,dt,threads:N});
+        }};
+      w.postMessage({y0:k*slab,y1:Math.min(H,(k+1)*slab),W,H,CX,CY,STEP,MAXITER});
+    });
+  });
+}
+// ---------------- GPU harness
+const FS32=`#version 300 es
+precision highp float; precision highp int;
+uniform vec2 uC; uniform float uStep; uniform ivec2 uSize; uniform int uMax;
+out vec4 o;
+void main(){
+  ivec2 p=ivec2(gl_FragCoord.xy);
+  vec2 c=uC+vec2((float(p.x)-float(uSize.x)*0.5)*uStep,
+                 (float(p.y)-float(uSize.y)*0.5)*uStep);
+  vec2 z=vec2(0.); int n=0;
+  while(n<uMax){
+    float x2=z.x*z.x,y2=z.y*z.y;
+    if(x2+y2>4.0) break;
+    z=vec2(x2-y2+c.x,2.0*z.x*z.y+c.y); n++;
+  }
+  o=vec4(float(n),0.,0.,1.);
+}`;
+
+// Dekker/Knuth double-float: each number is a (hi,lo) pair of fp32.
+const FSDF=`#version 300 es
+precision highp float; precision highp int;
+uniform vec2 uCx; uniform vec2 uCy; uniform vec2 uStepD;
+uniform ivec2 uSize; uniform int uMax;
+out vec4 o;
+vec2 quickTwoSum(float a,float b){float s=a+b;return vec2(s,b-(s-a));}
+vec2 twoSum(float a,float b){
+  float s=a+b; float v=s-a;
+  return vec2(s,(a-(s-v))+(b-v));}
+vec2 splitf(float a){
+  float t=8193.0*a; float hi=t-(t-a); return vec2(hi,a-hi);}
+vec2 twoProd(float a,float b){
+  float p=a*b; vec2 aS=splitf(a),bS=splitf(b);
+  float e=((aS.x*bS.x-p)+aS.x*bS.y+aS.y*bS.x)+aS.y*bS.y;
+  return vec2(p,e);}
+vec2 dfAdd(vec2 a,vec2 b){
+  vec2 s=twoSum(a.x,b.x);
+  return quickTwoSum(s.x,s.y+a.y+b.y);}
+vec2 dfMul(vec2 a,vec2 b){
+  vec2 p=twoProd(a.x,b.x);
+  return quickTwoSum(p.x,p.y+a.x*b.y+a.y*b.x);}
+vec2 dfF(float a){return vec2(a,0.0);}
+void main(){
+  ivec2 p=ivec2(gl_FragCoord.xy);
+  vec2 dx=dfMul(dfAdd(dfF(float(p.x)),dfF(-float(uSize.x)*0.5)),uStepD);
+  vec2 dy=dfMul(dfAdd(dfF(float(p.y)),dfF(-float(uSize.y)*0.5)),uStepD);
+  vec2 cx=dfAdd(uCx,dx), cy=dfAdd(uCy,dy);
+  vec2 zx=dfF(0.0), zy=dfF(0.0);
+  int n=0;
+  while(n<uMax){
+    vec2 x2=dfMul(zx,zx), y2=dfMul(zy,zy);
+    if(x2.x+y2.x>4.0) break;
+    vec2 nzy=dfAdd(dfMul(dfMul(dfF(2.0),zx),zy),cy);
+    zx=dfAdd(dfAdd(x2,vec2(-y2.x,-y2.y)),cx);
+    zy=nzy; n++;
+  }
+  o=vec4(float(n),0.,0.,1.);
+}`;
+
+function makeGL(){
+  const cv=document.createElement('canvas');
+  const gl=cv.getContext('webgl2');
+  if(!gl) return null;
+  if(!gl.getExtension('EXT_color_buffer_float')) return null;
+  return gl;
+}
+function makeProg(gl,fsrc){
+  const vs=`#version 300 es
+    void main(){vec2 v=vec2((gl_VertexID<<1)&2,gl_VertexID&2);
+    gl_Position=vec4(v*2.-1.,0.,1.);}`;
+  function sh(t,s){const h=gl.createShader(t);gl.shaderSource(h,s);
+    gl.compileShader(h);
+    if(!gl.getShaderParameter(h,gl.COMPILE_STATUS))
+      throw new Error(gl.getShaderInfoLog(h));
+    return h;}
+  const p=gl.createProgram();
+  gl.attachShader(p,sh(gl.VERTEX_SHADER,vs));
+  gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fsrc));
+  gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS))
+    throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+async function benchGPU(gl,fsrc,setUniforms){
+  const p=makeProg(gl,fsrc); gl.useProgram(p);
+  setUniforms(gl,p);
+  const tex=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D,tex);
+  gl.texStorage2D(gl.TEXTURE_2D,1,gl.R32F,W,H);
+  const fbo=gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  gl.viewport(0,0,W,H);
+  const px=new Float32Array(4);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  gl.readPixels(0,0,1,1,gl.RED,gl.FLOAT,px);
+  const t0=performance.now();
+  for(let f=0;f<FRAMES;f++) gl.drawArrays(gl.TRIANGLES,0,3);
+  gl.readPixels(0,0,1,1,gl.RED,gl.FLOAT,px);
+  const dt=(performance.now()-t0)/1e3/FRAMES;
+  const buf=new Float32Array(W*H);
+  gl.readPixels(0,0,W,H,gl.RED,gl.FLOAT,buf);
+  let total=0; const iters=new Int32Array(W*H);
+  for(let k=0;k<W*H;k++){iters[k]=buf[k]; total+=buf[k];}
+  return {total,dt,iters};
+}
+// ---------------- orchestration
+const fmt=n=>n.toLocaleString('en-GB',{maximumFractionDigits:2});
+function row(name,prec,thr,dt,rate,base){
+  return `<tr><td>${name}</td><td>${prec}</td><td>${thr}</td>`+
+   `<td>${fmt(dt*1e3)}</td><td class="big">${fmt(rate/1e9)}</td>`+
+   `<td>${fmt(rate/base)}&times;</td></tr>`;
+}
+document.getElementById('go').onclick=async()=>{
+  const log=m=>document.getElementById('log').textContent=m;
+  const btn=document.getElementById('go'); btn.disabled=true;
+  const rows=[];
+  try{
+    log('JS fp64, 1 thread... (the slow one, hold tight)');
+    await new Promise(r=>setTimeout(r,50));
+    const j1=benchJS1(); const base=j1.total/j1.dt;
+    rows.push(['JavaScript','fp64','1',j1.dt,base]);
+
+    log('Web Workers, all cores...');
+    const jn=await benchWorkers();
+    rows.push(['Web Workers','fp64',String(jn.threads),jn.dt,jn.total/jn.dt]);
+
+    const gl=makeGL();
+    let g32=null,gdf=null,dbg='';
+    if(gl){
+      const ext=gl.getExtension('WEBGL_debug_renderer_info');
+      dbg=ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):'GPU (masked)';
+      log('WebGL2 fp32...');
+      g32=await benchGPU(gl,FS32,(gl,p)=>{
+        gl.uniform2f(gl.getUniformLocation(p,'uC'),CX,CY);
+        gl.uniform1f(gl.getUniformLocation(p,'uStep'),STEP);
+        gl.uniform2i(gl.getUniformLocation(p,'uSize'),W,H);
+        gl.uniform1i(gl.getUniformLocation(p,'uMax'),MAXITER);});
+      rows.push([dbg,'fp32','\u2013',g32.dt,g32.total/g32.dt]);
+
+      log('WebGL2 emulated fp64 (Dekker double-float)...');
+      const hi=Math.fround(STEP), lo=STEP-hi;
+      const cxh=Math.fround(CX), cxl=CX-cxh;
+      const cyh=Math.fround(CY), cyl=CY-cyh;
+      gdf=await benchGPU(gl,FSDF,(gl,p)=>{
+        gl.uniform2f(gl.getUniformLocation(p,'uCx'),cxh,cxl);
+        gl.uniform2f(gl.getUniformLocation(p,'uCy'),cyh,cyl);
+        gl.uniform2f(gl.getUniformLocation(p,'uStepD'),hi,lo);
+        gl.uniform2i(gl.getUniformLocation(p,'uSize'),W,H);
+        gl.uniform1i(gl.getUniformLocation(p,'uMax'),MAXITER);});
+      rows.push([dbg+' (df64 emu)','fp64 (2\u00d7fp32)','\u2013',gdf.dt,gdf.total/gdf.dt]);
+    }
+    log('');
+    let html='<table><tr><th>backend</th><th>precision</th><th>threads</th>'+
+      '<th>ms/frame</th><th>Giter/s</th><th>vs 1 thread</th></tr>';
+    for(const [n,p,t,dt,r] of rows) html+=row(n,p,t,dt,r,base);
+    html+='</table>';
+    if(gdf){
+      let mm=0; for(let k=0;k<W*H;k++) if(gdf.iters[k]!==j1.iters[k]) mm++;
+      html+=`<p class="note">cross-check: emulated-double GPU vs native-double JS \u2014 `+
+        `${mm.toLocaleString()}/${(W*H).toLocaleString()} pixels differ `+
+        `(${(100*mm/(W*H)).toFixed(2)}%). Rounding-order flips at the boundary `+
+        `are expected; a large number means the driver optimised the Dekker `+
+        `trick away \u2014 which is itself a result.</p>`;
+    }
+    html+=`<p class="note">workload: ${W}\u00d7${H} @ maxiter ${MAXITER}, `+
+      `${(rows[0][3]*base/1e9).toFixed(2)} G iterations/frame</p>`;
+    document.getElementById('results').innerHTML=html;
+  }catch(e){ log('error: '+e.message); }
+  btn.disabled=false;
+};
+</script>
+</body>
+</html>
