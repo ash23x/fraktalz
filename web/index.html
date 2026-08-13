@@ -225,34 +225,46 @@ function makeProg(gl,fsrc){
     throw new Error(gl.getProgramInfoLog(p));
   return p;
 }
+function chk(gl,stage){const e=gl.getError();
+  if(e)throw new Error(stage+": GL error 0x"+e.toString(16));}
+
 async function benchGPU(gl,fsrc,setUniforms){
+  while(gl.getError()!==gl.NO_ERROR){}                 // clean slate
   const p=makeProg(gl,fsrc); gl.useProgram(p);
-  setUniforms(gl,p);
+  setUniforms(gl,p); chk(gl,"program + uniforms");
   const tex=gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D,tex);
-  gl.texStorage2D(gl.TEXTURE_2D,1,gl.RGBA32F,W,H);
+  gl.texStorage2D(gl.TEXTURE_2D,1,gl.RGBA32F,W,H);
   const fbo=gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
   const st=gl.checkFramebufferStatus(gl.FRAMEBUFFER);
   if(st!==gl.FRAMEBUFFER_COMPLETE)
     throw new Error("framebuffer incomplete: 0x"+st.toString(16));
-  gl.viewport(0,0,W,H);
-  while(gl.getError()!==gl.NO_ERROR){}  // drain stale errors
-  const px=new Float32Array(4);
-  gl.drawArrays(gl.TRIANGLES,0,3);
-  gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,px);         // hard sync
+  gl.viewport(0,0,W,H); chk(gl,"framebuffer setup");
+  gl.drawArrays(gl.TRIANGLES,0,3); chk(gl,"warm-up draw");
+  // Which float readback combo does this browser actually accept?
+  let fmt=gl.RGBA, ch=4;
+  gl.readPixels(0,0,1,1,fmt,gl.FLOAT,new Float32Array(4));
+  if(gl.getError()!==gl.NO_ERROR){
+    fmt=gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT);
+    const type=gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE);
+    if(type!==gl.FLOAT)
+      throw new Error("no float readback path (impl type 0x"+type.toString(16)+")");
+    ch=({[gl.RGBA]:4,[gl.RGB]:3,[gl.RG]:2,[gl.RED]:1})[fmt]||4;
+    gl.readPixels(0,0,1,1,fmt,gl.FLOAT,new Float32Array(ch));
+    chk(gl,"implementation-format readback probe");
+  }
+  const px=new Float32Array(ch);
   const t0=performance.now();
   for(let f=0;f<FRAMES;f++) gl.drawArrays(gl.TRIANGLES,0,3);
-  gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,px);         // sync the batch
+  gl.readPixels(0,0,1,1,fmt,gl.FLOAT,px); chk(gl,"timing sync read");
   const dt=(performance.now()-t0)/1e3/FRAMES;
-  const buf=new Float32Array(W*H*4);
-  gl.readPixels(0,0,W,H,gl.RGBA,gl.FLOAT,buf);
-  const err=gl.getError();
-  if(err) throw new Error("readPixels failed, GL error 0x"+err.toString(16));
+  const buf=new Float32Array(W*H*ch);
+  gl.readPixels(0,0,W,H,fmt,gl.FLOAT,buf); chk(gl,"full readback");
   let total=0; const iters=new Int32Array(W*H);
-  for(let k=0;k<W*H;k++){iters[k]=buf[k*4]; total+=buf[k*4];}
-  if(total===0) throw new Error("GPU returned all zeros -- readback broken");
+  for(let k=0;k<W*H;k++){iters[k]=buf[k*ch]; total+=buf[k*ch];}
+  if(total===0) throw new Error("GPU returned all zeros");
   return {total,dt,iters};
 }
 // ---------------- orchestration
