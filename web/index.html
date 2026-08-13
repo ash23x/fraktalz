@@ -230,11 +230,16 @@ async function benchGPU(gl,fsrc,setUniforms){
   setUniforms(gl,p);
   const tex=gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D,tex);
-  gl.texStorage2D(gl.TEXTURE_2D,1,gl.R32F,W,H);
+  gl.texStorage2D(gl.TEXTURE_2D,1,gl.RGBA32F,W,H);
+  if(gl.checkFramebufferStatus===undefined){}
   const fbo=gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tex,0);
+  const st=gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+  if(st!==gl.FRAMEBUFFER_COMPLETE)
+    throw new Error("framebuffer incomplete: 0x"+st.toString(16));
   gl.viewport(0,0,W,H);
+  while(gl.getError()!==gl.NO_ERROR){}  // drain stale errors
   const px=new Float32Array(4);
   gl.drawArrays(gl.TRIANGLES,0,3);
   gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,px);         // hard sync
