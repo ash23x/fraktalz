@@ -40,6 +40,12 @@
     WebGL2 fp32 &middot; WebGL2 <em>emulated</em> fp64 (Dekker double-float —
     WebGL has no real doubles, so we build them from pairs of floats and
     measure what that costs).
+    <p class="note">Browsers deliberately anonymise hardware: the GPU name is
+    bucketed to a generic "similar" card, the CPU model is never exposed, and
+    the reported core count may be capped. The numbers are real; the labels
+    are through frosted glass. The
+    <a href="https://github.com/ash23x/fraktalz" style="color:var(--acc)">desktop
+    bench</a> tells the whole truth.</p>
     <p><button id="go">Run the benchmark</button></p>
     <div id="log"></div>
   </div>
@@ -231,15 +237,18 @@ async function benchGPU(gl,fsrc,setUniforms){
   gl.viewport(0,0,W,H);
   const px=new Float32Array(4);
   gl.drawArrays(gl.TRIANGLES,0,3);
-  gl.readPixels(0,0,1,1,gl.RED,gl.FLOAT,px);
+  gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,px);         // hard sync
   const t0=performance.now();
   for(let f=0;f<FRAMES;f++) gl.drawArrays(gl.TRIANGLES,0,3);
-  gl.readPixels(0,0,1,1,gl.RED,gl.FLOAT,px);
+  gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,px);         // sync the batch
   const dt=(performance.now()-t0)/1e3/FRAMES;
-  const buf=new Float32Array(W*H);
-  gl.readPixels(0,0,W,H,gl.RED,gl.FLOAT,buf);
+  const buf=new Float32Array(W*H*4);
+  gl.readPixels(0,0,W,H,gl.RGBA,gl.FLOAT,buf);
+  const err=gl.getError();
+  if(err) throw new Error("readPixels failed, GL error 0x"+err.toString(16));
   let total=0; const iters=new Int32Array(W*H);
-  for(let k=0;k<W*H;k++){iters[k]=buf[k]; total+=buf[k];}
+  for(let k=0;k<W*H;k++){iters[k]=buf[k*4]; total+=buf[k*4];}
+  if(total===0) throw new Error("GPU returned all zeros -- readback broken");
   return {total,dt,iters};
 }
 // ---------------- orchestration
@@ -261,7 +270,7 @@ document.getElementById('go').onclick=async()=>{
 
     log('Web Workers, all cores...');
     const jn=await benchWorkers();
-    rows.push(['Web Workers','fp64',String(jn.threads),jn.dt,jn.total/jn.dt]);
+    rows.push(['Web Workers','fp64',jn.threads+' (as reported)',jn.dt,jn.total/jn.dt]);
 
     const gl=makeGL();
     let g32=null,gdf=null,dbg='';
