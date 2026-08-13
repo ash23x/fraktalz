@@ -46,7 +46,39 @@ There is a browser twin in [`web/`](web/) — same workload in JS
 via Dekker double-float arithmetic, because WebGL has no doubles at all
 and the precision story deserved a third act).
 
-## The renderer
+
+## In the browser
+
+Same workload, Chrome on the same machine ([`web/`](web/), one static file,
+no build step):
+
+| backend | precision | threads | ms/frame | Giter/s |
+|---|---|---|---|---|
+| JavaScript | fp64 | 1 | 281.6 | 0.52 |
+| Web Workers | fp64 | 32 | 65.6 | 2.24 |
+| RTX 4070 via ANGLE/D3D11 | fp32 | \u2013 | 2.79 | 52.64 |
+| RTX 4070 via ANGLE/D3D11 | df64 emulated | \u2013 | 3.03 | 48.47\u2020 |
+
+Three findings:
+
+1. **V8 gets within 4% of native.** Single-threaded JavaScript hits 0.52
+   Giter/s against 0.54 for LLVM-compiled native code on the identical
+   loop. The "JS is slow" era is long over for arithmetic like this.
+2. **The ANGLE tax is ~7\u00d7.** The same GPU that does 353 Giter/s under
+   native OpenGL manages 52.6 through the WebGL\u2192D3D11 translation layer.
+3. **\u2020 The cross-check caught the shader compiler cheating.** The Dekker
+   double-float emulation ran suspiciously close to fp32 speed \u2014 because
+   the D3D11 compiler's fast-math reassociated the error-compensation
+   terms away, silently destroying the emulated precision. Detected by
+   comparing iteration counts against natively-fp64 JavaScript: 26% of
+   pixels mismatched, vs 0.37% expected from rounding-order flips. A
+   benchmark that validates its own answers finds things a stopwatch
+   never will.
+
+The GPU path requires a Chromium browser; Firefox rasterises
+attribute-less triangles into the void and returns zeros without an
+error. CPU rows run everywhere.
+\n## The renderer
 
 The benchmark is a by-product. The actual program is a real-time deep-zoom
 flythrough:

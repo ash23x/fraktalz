@@ -289,7 +289,8 @@ document.getElementById('go').onclick=async()=>{
     rows.push(['Web Workers','fp64',jn.threads+' (as reported)',jn.dt,jn.total/jn.dt]);
 
     const gl=makeGL();
-    let g32=null,gdf=null,dbg='';
+    let g32=null,gdf=null,dbg='',gpuFail=null;
+    try{
     if(gl){
       const ext=gl.getExtension('WEBGL_debug_renderer_info');
       dbg=ext?gl.getParameter(ext.UNMASKED_RENDERER_WEBGL):'GPU (masked)';
@@ -313,11 +314,20 @@ document.getElementById('go').onclick=async()=>{
         gl.uniform1i(gl.getUniformLocation(p,'uMax'),MAXITER);});
       rows.push([dbg+' (df64 emu)','fp64 (2\u00d7fp32)','\u2013',gdf.dt,gdf.total/gdf.dt]);
     }
+    }catch(e){ gpuFail=e.message; }
     log('');
     let html='<table><tr><th>backend</th><th>precision</th><th>threads</th>'+
       '<th>ms/frame</th><th>Giter/s</th><th>vs 1 thread</th></tr>';
     for(const [n,p,t,dt,r] of rows) html+=row(n,p,t,dt,r,base);
     html+='</table>';
+    if(!gl||gpuFail){
+      html+=`<p class="note">GPU rows unavailable in this browser`+
+        (gpuFail?` (${gpuFail})`:'')+`. The WebGL path needs a Chromium `+
+        `browser \u2014 Chrome or Edge. Firefox currently rasterises `+
+        `attribute-less fullscreen triangles into the void and returns `+
+        `zeros without raising an error, which is not a benchmark, `+
+        `it is performance art.</p>`;
+    }
     if(gdf){
       let mm=0; for(let k=0;k<W*H;k++) if(gdf.iters[k]!==j1.iters[k]) mm++;
       html+=`<p class="note">cross-check: emulated-double GPU vs native-double JS \u2014 `+
