@@ -2,6 +2,8 @@
 
 **A real-time Mandelbrot flythrough — and a benchmark that makes your silicon confess.**
 
+**▶ [Try the browser benchmark live](https://temporary-zippy-silicon-4xdfm48.vercel.app) — Chrome required.**
+
 ![Seahorse Valley](gallery/0_Seahorse_Valley.png)
 
 Most benchmarks are synthetic. This one is a fractal: the same `z² + c`
