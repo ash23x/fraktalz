@@ -80,7 +80,38 @@ Three findings:
 The GPU path requires a Chromium browser; Firefox rasterises
 attribute-less triangles into the void and returns zeros without an
 error. CPU rows run everywhere.
-\n## The renderer
+
+
+## One machine, three lenses
+
+The same silicon measured natively, through Chrome, and through Firefox
+(Giter/s, higher is better):
+
+| backend | native | Chrome | Firefox |
+|---|---|---|---|
+| 1 thread, fp64 | 0.54 (LLVM) | 0.53 (V8) | 0.46 (SpiderMonkey) |
+| all threads, fp64 | 6.90 (32T) | 2.39 (32T) | 0.89 ("2" threads) |
+| GPU fp32 | 352.9 | 34-53 | declines |
+| GPU fp64 | 0.64 (native) | ~45 (emulated, see note) | declines |
+
+What the lenses reveal:
+
+- **V8 is within a rounding error of LLVM** on this loop; SpiderMonkey
+  trails by ~13%.
+- **Firefox's anti-fingerprinting reports 2 cores on a 32-thread
+  machine**, so its worker pool runs at a 2.7x deficit to Chrome on
+  identical hardware -- a measurable price of privacy theatre.
+- **Firefox runs no GPU rows at all**: it rasterises the attribute-less
+  fullscreen triangle into the void, silently. The page degrades to
+  CPU-only there by design.
+- **Browser GPU numbers are directional, not reference.** Run-to-run
+  variance is large (fp32 measured 34-53 Giter/s across runs), and the
+  df64 row sometimes beats fp32 -- arithmetically impossible for honest
+  double-float, and further evidence the D3D11 compiler has stripped
+  the compensation terms. The desktop bench, with hard `ctx.finish()`
+  synchronisation and a 0.37% cross-check, is the instrument of record.
+
+## The renderer
 
 The benchmark is a by-product. The actual program is a real-time deep-zoom
 flythrough:
